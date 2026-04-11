@@ -4,52 +4,69 @@ import time
 import re
 
 def clean_phone(raw):
-    """Remove all non-digit characters, normalize leading 0 -> 62"""
     digits = re.sub(r"\D", "", raw)
     if digits.startswith("0"):
         digits = "62" + digits[1:]
     return digits
 
-def scrape_contact(page, detail_url):
-    """Open shop detail page and extract phone + email."""
+def extract_contact_from_page(page):
+    """Extract phone and email from current page content."""
     phone, email = "", ""
     try:
-        page.goto(detail_url, wait_until="domcontentloaded", timeout=15000)
-        page.wait_for_timeout(2000)
+        content = page.inner_text("body")
 
-        content = page.content()
-
-        # Email
         email_match = re.search(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", content)
         if email_match:
             email = email_match.group(0)
 
-        # Phone — look for Indonesian numbers
         phone_match = re.search(r"(\+?62[\s\-]?\d[\d\s\-]{7,14}|0\d[\d\s\-]{7,14})", content)
         if phone_match:
             phone = clean_phone(phone_match.group(0))
+    except Exception:
+        pass
+    return phone, email
 
-        # Also try visible text on page
-        if not phone or not email:
-            try:
-                contact_section = page.query_selector_all("[class*='contact'], [class*='Contact'], [class*='info'], [class*='Info']")
-                for el in contact_section:
-                    text = el.inner_text()
-                    if not email:
-                        em = re.search(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", text)
-                        if em:
-                            email = em.group(0)
-                    if not phone:
-                        ph = re.search(r"(\+?62[\s\-]?\d[\d\s\-]{7,14}|0\d[\d\s\-]{7,14})", text)
-                        if ph:
-                            phone = clean_phone(ph.group(0))
-            except Exception:
-                pass
+def search_and_extract(detail_page, brand_name, platform):
+    """Search Yahoo for brand+platform, visit first result, extract contact."""
+    phone, email, profile_url = "", "", ""
+    query = f"{brand_name} {platform}"
+    yahoo_url = f"https://search.yahoo.com/search?p={query.replace(' ', '+')}"
+
+    try:
+        detail_page.goto(yahoo_url, wait_until="domcontentloaded", timeout=15000)
+        detail_page.wait_for_timeout(2000)
+
+        # Get first organic result link
+        result_links = detail_page.query_selector_all("div#web ol li h3 a, div.algo h3 a, div.dd.algo h3 a")
+        target_url = ""
+        for link in result_links:
+            href = link.get_attribute("href") or ""
+            if platform.lower() in href.lower():
+                target_url = href
+                break
+
+        # Fallback: grab any link containing platform domain
+        if not target_url:
+            all_links = detail_page.query_selector_all("a[href]")
+            for link in all_links:
+                href = link.get_attribute("href") or ""
+                if platform.lower() + ".com" in href.lower() and "yahoo" not in href.lower():
+                    target_url = href
+                    break
+
+        if target_url:
+            profile_url = target_url
+            print(f"    [{platform}] Found: {target_url[:80]}")
+            detail_page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
+            detail_page.wait_for_timeout(3000)
+            phone, email = extract_contact_from_page(detail_page)
+        else:
+            print(f"    [{platform}] No result found")
 
     except Exception as e:
-        print(f"  Error fetching contact: {e}")
+        print(f"    [{platform}] Error: {e}")
 
-    return phone, email
+    return phone, email, profile_url
 
 
 def scrape(max_pages=None, output_file="brands.csv"):
@@ -76,10 +93,9 @@ def scrape(max_pages=None, output_file="brands.csv"):
             print(f"\n--- Page {current_page} ---")
 
             try:
-                # Wait for the actual table rows with shop data
                 list_page.wait_for_selector("tbody.ant-table-tbody tr.ant-table-row", timeout=15000)
             except Exception:
-                print("Brand elements not found, stopping.")
+                print("Table not found, stopping.")
                 break
 
             rows = list_page.query_selector_all("tbody.ant-table-tbody tr.ant-table-row")
@@ -89,7 +105,7 @@ def scrape(max_pages=None, output_file="brands.csv"):
                 name_el = row.query_selector("h3.content.truncate")
                 brand_name = name_el.get_attribute("text") or name_el.inner_text().strip() if name_el else ""
 
-                # Category - inside custom-tag-container
+                # Category
                 cat_el = row.query_selector("div.custom-tag-container span.text-ellipsis")
                 category = cat_el.inner_text().strip() if cat_el else ""
 
@@ -98,29 +114,27 @@ def scrape(max_pages=None, output_file="brands.csv"):
 
                 print(f"  [{i+1}] {brand_name} | {category}")
 
-                # Get detail page URL from the row link
-                link_el = row.query_selector("a[href*='/shop-marketing/detail/']")
-                detail_url = ""
-                if link_el:
-                    href = link_el.get_attribute("href")
-                    if href:
-                        detail_url = href if href.startswith("http") else "https://www.fastmoss.com" + href
+                # Search Facebook
+                fb_phone, fb_email, fb_url = search_and_extract(detail_page, brand_name, "facebook")
+                time.sleep(1)
 
-                phone, email = "", ""
-                if detail_url:
-                    phone, email = scrape_contact(detail_page, detail_url)
-                    print(f"     Phone: {phone or '-'} | Email: {email or '-'}")
-                    # Go back to list page context
-                    list_page.bring_to_front()
+                # Search Instagram
+                ig_phone, ig_email, ig_url = search_and_extract(detail_page, brand_name, "instagram")
+                time.sleep(1)
 
                 results.append({
                     "brand_name": brand_name,
                     "category": category,
-                    "phone": phone,
-                    "email": email,
+                    "fb_url": fb_url,
+                    "fb_phone": fb_phone,
+                    "fb_email": fb_email,
+                    "ig_url": ig_url,
+                    "ig_phone": ig_phone,
+                    "ig_email": ig_email,
                 })
 
-                time.sleep(1)
+                # Bring list page back to front
+                list_page.bring_to_front()
 
             # Next page
             next_btn = list_page.query_selector("li.ant-pagination-next:not([aria-disabled='true']) button")
@@ -139,7 +153,11 @@ def scrape(max_pages=None, output_file="brands.csv"):
         return
 
     with open(output_file, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["brand_name", "category", "phone", "email"])
+        writer = csv.DictWriter(f, fieldnames=[
+            "brand_name", "category",
+            "fb_url", "fb_phone", "fb_email",
+            "ig_url", "ig_phone", "ig_email",
+        ])
         writer.writeheader()
         writer.writerows(results)
 
@@ -147,5 +165,5 @@ def scrape(max_pages=None, output_file="brands.csv"):
 
 
 if __name__ == "__main__":
-    # Set max_pages=10 to test first, None = all 500 pages
-    scrape(max_pages=10, output_file="brands.csv")
+    # Set max_pages=2 to test first, None = all 500 pages
+    scrape(max_pages=2, output_file="brands.csv")
