@@ -369,14 +369,30 @@ def scrape_facebook(page, brand_name: str) -> dict:
         log.warning(f"    [FB] Failed to load page: {e}")
         return result
 
-    # Login wall — re-login and retry
+    # Login wall — re-login inline and retry
     if "login" in page.url or "checkpoint" in page.url:
         log.warning("    [FB] Login wall — re-logging in")
-        login_facebook(page)
+        page.goto("https://www.facebook.com/login", wait_until="domcontentloaded", timeout=15000)
+        page.wait_for_timeout(2000)
         try:
+            page.wait_for_selector("input#email", timeout=8000)
+            page.fill("input#email", FB_EMAIL)
+            page.wait_for_selector("input#pass", timeout=5000)
+            page.fill("input#pass", FB_PASSWORD)
+            page.wait_for_timeout(500)
+            for sel in ["button[name='login']", "button[type='submit']"]:
+                try:
+                    btn = page.wait_for_selector(sel, timeout=3000)
+                    if btn:
+                        btn.click()
+                        break
+                except Exception:
+                    pass
+            page.wait_for_timeout(5000)
             page.goto(fb_url, wait_until="domcontentloaded", timeout=20000)
             page.wait_for_timeout(3000)
-        except Exception:
+        except Exception as e:
+            log.error(f"    [FB] Re-login failed: {e}")
             return result
 
     # Visit /about tab
@@ -462,24 +478,27 @@ def scrape(max_pages: int | None = None, output_file: str = "brands.csv", checkp
                 )
             )
 
-            # --- Phase 1: FastMoss login ---
+            # --- Login to all platforms first, session cookies stay in context ---
+            login_page = context.new_page()
+
+            # Instagram login
+            log.info("=== Logging in to Instagram ===")
+            login_page.goto("https://www.instagram.com/accounts/login/", wait_until="domcontentloaded", timeout=15000)
+            login_instagram(login_page)
+
+            # Facebook login (reuse same tab)
+            log.info("=== Logging in to Facebook ===")
+            login_facebook(login_page)
+
+            login_page.close()
+
+            # --- FastMoss tab ---
             list_page = context.new_page()
-            log.info("Opening FastMoss...")
+            log.info("=== Opening FastMoss ===")
             list_page.goto("https://www.fastmoss.com/id/shop-marketing/search?region=ID")
             login_fastmoss(list_page)
 
-            # --- Instagram login (dedicated tab, then close) ---
-            ig_page = context.new_page()
-            ig_page.goto("https://www.instagram.com/accounts/login/", wait_until="domcontentloaded", timeout=15000)
-            login_instagram(ig_page)
-            ig_page.close()
-
-            # --- Facebook login (dedicated tab, then close) ---
-            fb_page = context.new_page()
-            login_facebook(fb_page)
-            fb_page.close()
-
-            # --- Scraping tab for IG + FB searches ---
+            # --- Single scraping tab reused for all IG + FB visits ---
             scrape_page = context.new_page()
 
             list_page.bring_to_front()
